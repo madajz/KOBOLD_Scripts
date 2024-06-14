@@ -1,0 +1,487 @@
+---
+title: "Kobold Water Concs"
+output:
+  html_document: default
+  pdf_document: default
+date: "2023-12-04"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+library(patchwork)
+library(limma)
+library(openxlsx)
+library(data.table)
+library(factoextra)
+library(ggplot2)
+library(dplyr)
+library(pheatmap)
+library(ggrepel)
+library(ordinal)
+library(dplyr)
+
+```
+
+# Section {.tabset}
+
+```{r, include=F}
+
+my_pal = c("#ced3df","#8192af","#1f3970" )
+
+```
+
+
+
+
+
+```{r}
+
+#Read in data
+df.2b = read.table("Fig2_B_Kobold_44200_44235_44250_LIVER_Report.tsv",sep="\t",
+                   header=T,quote="")
+
+```
+
+## Exploratory plots
+
+```{r,  fig.height = 3.5, fig.width = 11}
+
+
+is.nan.data.frame <- function(x){do.call(cbind, lapply(x, is.nan))}
+df.2b.imp = df.2b
+df.2b.imp[is.nan(df.2b.imp)] <- 1
+ 
+pc.t = t(log2(df.2b.imp[,7:15]))
+
+colnames(pc.t) = paste0(df.2b.imp$PG.Genes,"_",df.2b.imp$PG.MolecularWeight)
+
+
+pcs = prcomp(pc.t)
+
+pc.d = as.data.frame(pcs$x)
+
+pc.d$ID = colnames(df.2b.imp[,7:15])
+
+pc.d$Conc = substr(gsub("..PC00033_ProjectKobold_Liver_442_", "",pc.d$ID),4,5)
+
+library(ggforce)
+set.seed(123)
+
+pc.d$Group = case_when(pc.d$Conc == "00" ~ "AMW20",
+                       pc.d$Conc == "35" ~ "AMW35",
+                       pc.d$Conc == "50" ~ "AMW50")
+
+
+
+p1 = ggplot(pc.d,aes(x = PC1,y=PC2,color=Group))  +geom_jitter(width=5,height=5,size=3)+scale_color_manual(values=c("#ced3df","#8192af","#1f3970" ))+theme_bw(11)+ geom_mark_ellipse()+scale_x_continuous(limits=c(-225,225),breaks=seq(-225,225,50))+scale_y_continuous(limits=c(-175,100),breaks=seq(-175,100,50)) + 
+  xlab(paste0("PC1 (",round(100*summary(pcs)$importance[2,][1],1),"%)"))+
+    ylab(paste0("PC2 (",round(100*summary(pcs)$importance[2,][2],1),"%)"))
+
+p2 = ggplot(pc.d,aes(x = PC3,y=PC4,color=Conc))  +geom_jitter(width=10)+scale_color_manual(values=c("#ced3df","#8192af","#1f3970" ))+theme_bw(11)+ 
+  xlab(paste0("PC3 (",round(100*summary(pcs)$importance[2,][3],1),"%)"))+
+    ylab(paste0("PC4 (",round(100*summary(pcs)$importance[2,][4],1),"%)"))
+
+p3 = ggplot(pc.d,aes(x = PC5,y=PC6,color=Conc))  +geom_jitter(width=10)+scale_color_manual(values=c("#ced3df","#8192af","#1f3970" ))+theme_bw(11)+ 
+  xlab(paste0("PC5 (",round(100*summary(pcs)$importance[2,][5],1),"%)"))+
+    ylab(paste0("PC6 (",round(100*summary(pcs)$importance[2,][6],1),"%)"))
+
+
+```
+
+```{r}
+
+write.csv(subset(pc.d,select=c(PC1,PC2,Group)),"Figure_3/3F_data.csv")
+
+pdf("~water_PCA.pdf", height=5,width=5)
+p1
+dev.off()
+
+```
+
+## Which metabs changed over concentration {.tabset}
+### Not Imputed
+
+
+```{r, include=F}
+
+df.2 = as.data.frame(t(df.2b.imp[7:15]))
+
+colnames(df.2)  = make.names(paste0(df.2b$PG.Genes,"_",df.2b$PG.MolecularWeight))
+
+df.2$conc = as.numeric(pc.d$Conc)
+res=NULL
+```
+
+
+```{r, include=F}
+
+df.2 = df.2[,which(!is.na(colnames(df.2)))]
+df.2 = df.2[, sapply(subset(df.2, select= - c(conc)), var) != 0]
+df.2$conc = as.character(df.2$conc)
+
+for(i in colnames(df.2)[colnames(df.2) != "conc"] ){
+  f1 = as.formula(paste0("as.factor(",i ,") ~ conc"))
+  f2 = as.formula(paste0("as.factor(",i ,") ~ 1"))
+  fit1 = clm(f1,data=df.2)
+  fit2 = clm(f2,data=df.2)
+  res= rbind(res,data.frame(Protein = i,Estimate =  tail(summary(fit1)$coeff,1)[1],
+ p = lmtest::lrtest(fit1,fit2)[2,]))
+  
+}
+
+res$FDR = p.adjust(res$p.Pr..Chisq.,method="BH")
+
+res$Sig = ifelse(res$FDR<0.05, "FDR < 0.05","NS")
+
+res$label = gsub("_.*","", res$Protein,1,10)
+
+res$label[abs(res$Estimate) < 1 | res$FDR > 0.05] = ""
+
+ggplot(res,aes(x = Estimate, y = -log10(FDR),color=Sig)) + geom_jitter(width=0.1,height=0.1) + theme_bw() +scale_color_manual(values=c("red","black"))+ggtitle("Proteins that change linearly with Conc")
+ord.res = res
+```
+
+
+
+### Limma {.tabset}
+
+## QC and data processing 
+
+This section pertains entirely to data processing including removal of proteins with too much missing data. Data are then normalized and missing measures are imputed.
+
+### No variance
+
+These proteins were removed due to 0 variance.
+
+```{r}
+
+cmpnds=as.data.frame(t(df.2b[7:15]))
+cmpnds$ID = colnames(df.2b[7:15])
+
+cmpnds[,1:(ncol(cmpnds))] = lapply(cmpnds[,1:(ncol(cmpnds))], as.numeric) ## 
+
+xx = data.matrix(cmpnds[,1:(ncol(cmpnds))]) ## duplicate cmpnds df 
+
+xx[is.na(xx)]  = 0 #convert NA to 0 
+cmpnds[,1:(ncol(cmpnds))] = xx ## replace cmpnds values with xx values (sub the NA for 0) can't I just do this in my regular df? 
+
+vars = apply(data.matrix(cmpnds[,1:(ncol(cmpnds))]), 2, var) # find the variance of all columns 
+
+ix = which(vars==0) # indicate where var = 0
+
+if(length(ix)>0){ ## remove if the variance is 0 
+cmpnds = cmpnds[, ! colnames(cmpnds) %in% names(ix) ]
+}
+
+
+
+```
+
+### Proteins identifed per sample
+
+Plotted here are the number of proteins detected per sample
+
+```{r}
+
+
+metabs = data.frame(  ID = colnames(df.2b)[7:15], Group = substr(colnames(df.2b)[7:15],34,39), count = unlist(lapply(1:nrow(cmpnds),function(x) sum(cmpnds[x,1:(ncol(cmpnds))]>0,na.rm=T) )))
+
+metabs = metabs[order(metabs$Group),]
+
+metabs$ID = substr(colnames(df.2b)[7:15],34,41)
+
+ggplot(metabs,aes(x=ID,y=count,fill=Group)) + 
+  geom_bar(stat="identity")+
+  theme_classic() +
+  scale_y_continuous(expand=c(0,0)) +theme(axis.text.x = element_text(angle=45,hjust=1)) + ggtitle("Number of Proteins Detected Per Sample") + scale_fill_manual(values=my_pal)
+
+
+# ggplotly(g) 
+
+summary(metabs$count)
+
+
+```
+
+### Missingness per sample 
+
+In the heatmaps below, white indicates a missing value, black indicates a value >0 was detected.  
+
+```{r,fig.height=15,fig.width=5}
+
+
+ind = function(x){
+  sum(as.numeric(I(as.numeric(x)==0)))
+}
+
+
+cmpnds$Group <- substr(colnames(df.2b)[7:15],34,39)
+
+temp = cmpnds
+
+temp[temp > 0] = 1 ## if over 0, count as 1 
+temp$Group = cmpnds$Group ## now add Group column 
+rownames(temp) = substr(colnames(df.2b)[7:15],34,41)
+
+
+
+heat.df = t(sapply(subset(temp,select= - c(Group)), as.numeric)) # convert all value columns to numeric 
+
+
+# --------------------------------- HEAT MAP CODE BELOW: 
+
+rownames(heat.df) = NULL
+colnames(heat.df) = rownames(temp)
+
+
+temp$Group<- as.factor(temp$Group) 
+
+Var1 <- my_pal
+names(Var1) <- c(levels(temp$Group))
+
+anno_colors <- list(Group = Var1)
+
+
+heat.df = heat.df[order(apply(heat.df, 1, ind),decreasing=T),]
+
+pheatmap(heat.df, annotation_col=subset(temp,select= c(Group)), cluster_rows = FALSE, color = colorRampPalette(c("white","black"))(2), annotation_colors = anno_colors) 
+
+```
+
+### Overlap of protein detected in at least one sample
+
+
+```{r}
+
+
+library(ggVennDiagram)
+
+colnames(temp) = c(paste0(df.2b$PG.Genes,"_",df.2b$PG.MolecularWeight),"Group")
+d442_00 = subset(temp[temp$Group == "442_00",],select= - c(Group))
+d442_35 = subset(temp[temp$Group == "442_35",],select= - c(Group))
+d442_50 = subset(temp[temp$Group == "442_50",],select= - c(Group))
+
+#Must be in 3/3
+proteins_list <- list(c442_00 = colnames(d442_00)[apply(d442_00, 2, ind) == 0], 
+                      c442_35 = colnames(d442_35)[apply(d442_35, 2, ind) == 0], 
+                      c442_50 = colnames(d442_50)[apply(d442_50, 2, ind) == 0])
+
+```
+
+
+
+```{r}
+
+venn.p = qpcR:::cbind.na( proteins_list[[1]] , data.frame(proteins_list[[2]]), data.frame(proteins_list[[3]]) )
+
+colnames(venn.p) = c("AMW20","AMW35","AMW50")
+
+write.csv(venn.p,"Figure_3/3g_data.csv")
+
+pdf("Fig1G_venn.pdf",height=5.25,width=5.25)
+ggVennDiagram(proteins_list, 
+                    category.names = c("AMW20","AMW35","AMW50"), label="count") +scale_color_manual(values=my_pal) +   scale_fill_gradient( low="white",high="red") +scale_x_continuous(expand = expansion(mult = .2))
+dev.off()
+library(eulerr)
+# names(proteins_list)= c("AMW20","AMW35","AMW50")
+
+fit = euler(proteins_list,shape="circle")
+colorpal = euler(proteins_list,shape="circle")$original
+colors = colorRampPalette(c("white","red"))(max(colorpal))
+plot(fit, quantities = TRUE,col = my_pal,lwd=3,fills =  colors[colorpal])
+
+
+```
+
+### Limma {.tabset}
+Analyze only pairwise complete proteins, so we'll run 3 limmas.
+
+```{r, fig.height=8}
+
+df.2$conc = as.character(df.2$conc)
+design = model.matrix(~ -1+conc ,data=df.2[df.2$conc !=50 ,])
+
+limma.matrix = data.matrix(t(log2(df.2[df.2$conc !=50,colnames(df.2) %in% intersect(proteins_list$c442_00,proteins_list$c442_35)])))
+
+fit = lmFit(limma.matrix,design)
+
+contr.matrix.35_00 <- limma::makeContrasts( conc35 - conc0 ,levels = design)
+fit35_00 <- limma::contrasts.fit(fit, contrasts=contr.matrix.35_00)
+fit35_00 <- limma::eBayes(fit35_00, trend=TRUE)
+
+table35_00 <- limma::topTable(fit35_00, number = 10000)
+table35_00$Comparison = "442+15 - 442+0"
+table35_00$Protein = rownames(table35_00)
+
+design = model.matrix(~ -1+conc ,data=df.2[df.2$conc !=35 ,])
+
+limma.matrix = data.matrix(t(log2(df.2[df.2$conc !=35,colnames(df.2) %in% intersect(proteins_list$c442_00,proteins_list$c442_50)])))
+
+fit = lmFit(limma.matrix,design)
+
+contr.matrix.50_00 <- limma::makeContrasts( conc50 - conc0 ,levels = design)
+fit50_00 <- limma::contrasts.fit(fit, contrasts=contr.matrix.50_00)
+fit50_00 <- limma::eBayes(fit50_00, trend=TRUE)
+
+table50_00 <- limma::topTable(fit50_00, number = 10000)
+table50_00$Comparison = "442+30 - 442+0"
+table50_00$Protein = rownames(table50_00)
+
+design = model.matrix(~ -1+conc ,data=df.2[df.2$conc !=0 ,])
+
+limma.matrix = data.matrix(t(log2(df.2[df.2$conc !=0,colnames(df.2) %in% intersect(proteins_list$c442_50,proteins_list$c442_35)])))
+
+fit = lmFit(limma.matrix,design)
+
+contr.matrix.50_35 <- limma::makeContrasts( conc50 - conc35 ,levels = design)
+fit50_35 <- limma::contrasts.fit(fit, contrasts=contr.matrix.50_35)
+fit50_35 <- limma::eBayes(fit50_35, trend=TRUE)
+
+table50_35 <- limma::topTable(fit50_35, number = 10000)
+table50_35$Comparison = "442+30 - 442+15"
+table50_35$Protein = rownames(table50_35)
+
+combo_table = rbind(table35_00,table50_00,table50_35)
+combo_table$adj.P.Val = p.adjust(combo_table$P.Value,method="BH")
+combo_table$sig =ifelse(combo_table$adj.P.Val < 0.05, "FDR < 0.05","NS")
+
+combo_table$Gene = gsub("_.*","",rownames(combo_table))
+
+names = subset(df.2b,select= c(PG.Genes,PG.Genes,PG.MolecularWeight))
+names$Protein = paste0(names$PG.Genes,"_",names$PG.MolecularWeight)
+
+names=subset(names,select=c(PG.Genes,Protein))
+ct = dplyr::left_join(combo_table,names)
+# knitr::kable(ct)
+
+ggplot(combo_table, aes(x = logFC, y = -log10(adj.P.Val), color=sig)) + geom_point() +theme_bw()+theme(legend.title = element_blank()) +scale_color_manual(values=c("red","black")) +xlab("logFC") + facet_wrap(~Comparison) 
+
+prots.all.3 = as.data.frame(table(combo_table$Protein))$Var1[as.data.frame(table(combo_table$Protein))$Freq==3]
+
+c.o = combo_table[order(combo_table$adj.P.Val),]
+c.o$Order = 1:nrow(c.o)
+c.o[substr(c.o$Protein,1,3) == "Got",]
+
+c3 = combo_table[combo_table$Protein %in% prots.all.3,]
+
+c3 = c3[order(c3$adj.P.Val,decreasing=F),]
+
+
+
+heat.df = t(log2(df.2[,colnames(df.2) %in% head(unique(c3$Protein),50)]))
+rownames(heat.df) = df.2b$PG.Genes[paste0(df.2b$PG.Genes,"_",df.2b$PG.MolecularWeight) %in% rownames(heat.df)]
+colnames(heat.df) = c("AMW20.1","AMW20.2","AMW20.3","AMW35.1","AMW35.2","AMW35.3","AMW50.1","AMW50.2","AMW50.3")
+
+temp = data.frame(Group = df.2$conc)
+temp$Group = factor(temp$Group,levels=c(0,35,50),labels=c("AMW20","AMW35","AMW50"))
+
+Var1 <- my_pal
+names(Var1) <- c(levels(temp$Group))
+
+anno_colors <- list(Group = Var1)
+rownames(temp) = colnames(heat.df)
+
+scale_rows = function(x){
+    m = apply(x, 1, mean, na.rm = T)
+    s = apply(x, 1, sd, na.rm = T)
+    return((x ) / s)
+}
+
+rownames(heat.df) = toupper(rownames(heat.df))
+
+pdf("water_heatmap.pdf",height=9,width=5.25)
+
+pheatmap(heat.df,scale="row", annotation_col=subset(temp,select= c(Group)),color = colorRampPalette(c("blue","white","red"))(100), annotation_colors = anno_colors,show_colnames = T)
+
+dev.off()
+
+
+```
+
+
+```{r}
+
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+genes = unique(df.2b$PG.Genes[paste0(df.2b$PG.Genes,"_",df.2b$PG.MolecularWeight) %in% prots.all.3])
+
+enrich.all.3 = unlist(mapIds(org.Mm.eg.db, keys = genes,
+       column = "ENTREZID", keytype = "SYMBOL"))
+
+genes.univ = unique(df.2b$PG.Genes)
+
+whole = read.xlsx("proteins in metabolite extracts (1).xlsx",sheet=2)
+
+enrich.univ = unlist(mapIds(org.Mm.eg.db, keys = union(unlist(whole),genes.univ),
+       column = "ENTREZID", keytype = "SYMBOL"))
+
+```
+
+
+
+```{r}
+
+
+set.seed(777)
+paths = summary(enrichGO(enrich.all.3,'org.Mm.eg.db',ont="BP",universe = enrich.univ,pvalueCutoff = 0.99))
+
+write.csv(file = "all_enriched_pathways_20_35_50.csv",paths[paths$qvalue<0.05,])
+
+
+head(paths$Description)
+
+paths$GeneRatio = sapply(paths$GeneRatio , function(x) eval(parse(text = x)))
+paths$Significant = ifelse(paths$qvalue < 0.05,"Significant","NS" )
+paths$label = paths$Description 
+# paths = paths[order(paths$GeneRatio,decreasing=T),]
+
+# paths$label[ !paths$ID %in% paths$ID[paths$p.adjust <0.05 & paths$ID %in% head(paths$ID,5)]] =""
+
+paths$label[5:nrow(paths)]= ""
+
+chk =  c("carboxylic acid catabolic process",
+ "organic acid catabolic process")
+
+
+sub = paths[paths$Description %in% chk,]
+
+sub[sub$geneID[1] == sub$geneID[2], ]
+
+```
+
+
+```{r}
+
+write.csv(subset(paths,select=c(Description,qvalue,label,Significant,GeneRatio)),"3H_data.csv")
+
+pdf("GSEA.pdf",height=5,width=6)
+
+ggplot(paths,aes(x =GeneRatio,y=-log10(qvalue),color=Significant)) + geom_point(size=3) +theme_bw()  +
+    geom_text_repel(aes(label = label),size=4,
+    box.padding = 1,
+    segment.ncp = 3,
+color="red") +
+  # scale_fill_gradient(low="white",high="red") +ylab("-log10(q-value)")
+  scale_color_manual(values=c("NS" = "black","Significant"="red"))
+
+dev.off()
+
+
+
+
+```
+
+
+```{r}
+
+
+genes.int = tolower(c("AADAT", "ABAT", "AGXT", "AGXT2", "GOT1","GOT2","GPT1", "GPT", "KYAT1", "KYAT3","OAT"))
+
+
+write.table(ord.res[tolower(gsub("_.*","",ord.res$Protein)) %in% tolower(genes.int),], file= "genes_of_interest.csv",sep="," )
+
+
+```
+

@@ -1,0 +1,369 @@
+---
+title: "Proteomics by Tissue"
+output: html_document
+date: "2023-12-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(dplyr)
+library(eulerr)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)
+library(ggplotify)
+library(cowplot)
+library(limma)
+library(pheatmap)
+library(ggforce)
+library(ggrepel)
+library(ggplot2)
+library(factoextra)
+library(plyr)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggVennDiagram)
+
+my_pal = c("#ced3df","#8192af","#1f3970" )
+
+```
+
+
+```{r}
+
+#Path to data
+path= ""
+
+#Get all file names because each tissue is in its own file
+temp = list.files(path=path,pattern="Fig2_D")
+
+#read data frames into a list
+df = list()
+for(i in temp){
+  df[[i]] = data.frame(read.table(paste0(path,"/",i ),sep="\t",quote="",header=T),tissue = strsplit(temp[i],"_")[[1]][7])
+
+}
+
+```
+
+
+## PCA
+
+
+```{r}
+
+#function to identify missing data
+is.nan.data.frame <- function(x){do.call(cbind, lapply(x, is.nan))}
+
+#PCA function
+pca.f = function(df.tissue,title){
+  
+  df.tissue.imp = df.tissue
+  df.tissue.imp[is.nan(df.tissue.imp)] <- 1
+   
+  pc.t = t(log2(df.tissue.imp[,7:15]))
+  
+  colnames(pc.t) = paste0(df.tissue.imp$PG.Genes,"_",df.tissue.imp$PG.MolecularWeight)
+  
+  pcs = prcomp(pc.t)
+  
+  pc.d = as.data.frame(pcs$x)
+  
+  pc.d$Conc = gsub(".*_","",unlist(stringr::str_extract_all(colnames(df[[names(df)[1]]])[7:15], "442_\\d+")))
+  
+  
+  set.seed(123)
+  pc.d$Group = case_when(pc.d$Conc == "00" ~ "AMW20",
+                         pc.d$Conc == "35" ~ "AMW35",
+                         pc.d$Conc == "50" ~ "AMW50")
+  
+  p1 = ggplot(pc.d,aes(x = PC1,y=PC2,color=Group))  +
+    geom_jitter(width=5,height=5,size=3)+
+    scale_color_manual(values=c("#ced3df","#8192af","#1f3970" ))+
+    theme_bw(11)+
+    geom_mark_ellipse() +
+    xlab(paste0("PC1 (",round(100*summary(pcs)$importance[2,][1],1),"%)"))+
+    ylab(paste0("PC2 (",round(100*summary(pcs)$importance[2,][2],1),"%)"))+
+    scale_x_continuous(limits=c(round_any(min(pc.d$PC1), 100, f = floor),
+                                round_any(max(pc.d$PC1), 100, f = ceiling)))+
+    scale_y_continuous(limits=c(round_any(min(pc.d$PC2), 100, f = floor),
+                                round_any(max(pc.d$PC2), 100, f = ceiling)))+
+    ggtitle(title)
+  
+  
+  return(p1)
+
+}
+
+```
+
+```{r}
+
+pdf("~/tissue_PCAs.pdf",height=5,width=30)
+
+plot_grid(pca.f(df[[names(df[1])]],strsplit(names(df[1]),"_")[[1]][7]) ,
+          pca.f(df[[names(df[2])]],strsplit(names(df[2]),"_")[[1]][7]) ,
+          pca.f(df[[names(df[3])]],strsplit(names(df[3]),"_")[[1]][7]) ,
+          pca.f(df[[names(df[4])]],strsplit(names(df[4]),"_")[[1]][7]) ,
+          pca.f(df[[names(df[5])]],strsplit(names(df[5]),"_")[[1]][7]) ,ncol = 5)
+
+dev.off()
+
+```
+
+## Differential Abundance
+Subset to only proteins in all 3 concentrations per tissue, get DAB, then GO.
+
+```{r}
+
+ind = function(x){
+  sum(as.numeric(I(as.numeric(x)==0)))
+}
+
+fit.go = function(df.tissue,title){
+  
+  #grab only compound columns and transpose, then make numeric
+  cmpnds=as.data.frame(t(df.tissue[7:15]))
+  cmpnds[,1:(ncol(cmpnds))] = lapply(cmpnds[,1:(ncol(cmpnds))], as.numeric) 
+  if(title == strsplit(names(df[4]),"_")[[1]][7]){
+    cmpnds$Group <- as.numeric(gsub(".*_","",gsub("raw.*","",gsub(".*442Super_","",rownames(cmpnds)))))
+    cmpnds$Group[cmpnds$Group == 20] = 0
+    colnames(cmpnds) = c(paste0(df.tissue$PG.Genes,"_",df.tissue$PG.MolecularWeight),"Group")
+  } else {
+    cmpnds$Group <- as.numeric(gsub("_.*","",gsub(".*442_","",rownames(cmpnds))))
+    colnames(cmpnds) = c(paste0(df.tissue$PG.Genes,"_",df.tissue$PG.MolecularWeight),"Group")
+  }
+  cmpnds[is.na(cmpnds)] = 0 ## replace cmpnds values with xx values (sub the NA for 0) can't I just do this in my regular df? 
+  
+  vars = apply(data.matrix(cmpnds[,1:(ncol(cmpnds))]), 2, var) # find the variance of all columns 
+  
+  ix = which(vars==0) # indicate where var = 0
+  
+  if(length(ix)>0){ ## remove if the variance is 0 
+    cmpnds = cmpnds[, ! colnames(cmpnds) %in% names(ix) ]
+  }
+  
+  temp = cmpnds
+  temp[temp > 0] = 1 ## if over 0, count as 1 
+  temp$Group = cmpnds$Group ## now add Group column 
+  rownames(temp) = make.unique(as.character(temp$Group))
+  
+  d442_00 = subset(temp[temp$Group == 0,],select= - c(Group))
+  d442_35 = subset(temp[temp$Group == 35,],select= - c(Group))
+  d442_50 = subset(temp[temp$Group == 50,],select= - c(Group))
+  
+  proteins_list <- list(c442_00 = colnames(d442_00)[apply(d442_00, 2, ind) == 0], 
+                        c442_35 = colnames(d442_35)[apply(d442_35, 2, ind) == 0], 
+                        c442_50 = colnames(d442_50)[apply(d442_50, 2, ind) == 0])
+  
+  fit = euler(proteins_list,shape="circle")
+  colorpal = euler(proteins_list,shape="circle")$original
+  colors = colorRampPalette(c("white","red"))(max(colorpal))
+  pv = plot(fit, quantities = TRUE,col = my_pal,lwd=3,fills =  colors[colorpal],main = title,fontsize	=18)
+  
+  df.2 = cmpnds
+  
+  colnames(df.2)[colnames(df.2) == "Group"] = "conc"
+  df.2$conc = as.character(df.2$conc)
+  
+  design = model.matrix(~ -1+conc ,data =df.2[df.2$conc !=50 ,])
+  
+  limma.matrix = data.matrix(t(log2(df.2[df.2$conc !=50,colnames(df.2) %in% intersect(proteins_list$c442_00,proteins_list$c442_35)])))
+  
+  fit = lmFit(limma.matrix,design)
+  
+  contr.matrix.35_00 <- limma::makeContrasts( conc35 - conc0 ,levels = design)
+  fit35_00 <- limma::contrasts.fit(fit, contrasts=contr.matrix.35_00)
+  fit35_00 <- limma::eBayes(fit35_00, trend=TRUE)
+  
+  table35_00 <- limma::topTable(fit35_00, number = 10000)
+  table35_00$Comparison = "442+15 - 442+0"
+  table35_00$Protein = rownames(table35_00)
+  
+  design = model.matrix(~ -1+conc ,data=df.2[df.2$conc !=35 ,])
+  
+  limma.matrix = data.matrix(t(log2(df.2[df.2$conc !=35,colnames(df.2) %in% intersect(proteins_list$c442_00,proteins_list$c442_50)])))
+  
+  fit = lmFit(limma.matrix,design)
+  
+  contr.matrix.50_00 <- limma::makeContrasts( conc50 - conc0 ,levels = design)
+  fit50_00 <- limma::contrasts.fit(fit, contrasts=contr.matrix.50_00)
+  fit50_00 <- limma::eBayes(fit50_00, trend=TRUE)
+  
+  table50_00 <- limma::topTable(fit50_00, number = 10000)
+  table50_00$Comparison = "442+30 - 442+0"
+  table50_00$Protein = rownames(table50_00)
+  
+  design = model.matrix(~ -1+conc ,data=df.2[df.2$conc !=0 ,])
+  
+  limma.matrix = data.matrix(t(log2(df.2[df.2$conc !=0,colnames(df.2) %in% intersect(proteins_list$c442_50,proteins_list$c442_35)])))
+  
+  fit = lmFit(limma.matrix,design)
+  
+  contr.matrix.50_35 <- limma::makeContrasts( conc50 - conc35 ,levels = design)
+  fit50_35 <- limma::contrasts.fit(fit, contrasts=contr.matrix.50_35)
+  fit50_35 <- limma::eBayes(fit50_35, trend=TRUE)
+  
+  table50_35 <- limma::topTable(fit50_35, number = 10000)
+  table50_35$Comparison = "442+30 - 442+15"
+  table50_35$Protein = rownames(table50_35)
+  
+  combo_table = rbind(table35_00,table50_00,table50_35)
+  combo_table$adj.P.Val = p.adjust(combo_table$P.Value,method="BH")
+  combo_table$sig =ifelse(combo_table$adj.P.Val < 0.05, "FDR < 0.05","NS")
+  
+  combo_table$Gene = gsub("_.*","",rownames(combo_table))
+  
+  names = subset(df.tissue,select= c(PG.Genes,PG.Genes,PG.MolecularWeight))
+  names$Protein = paste0(names$PG.Genes,"_",names$PG.MolecularWeight)
+  
+  names=subset(names,select=c(PG.Genes,Protein))
+  ct = dplyr::left_join(combo_table,names)
+  # knitr::kable(ct)
+  
+  ggplot(combo_table, aes(x = logFC, y = -log10(adj.P.Val), color=sig)) + geom_point() +theme_bw()+theme(legend.title = element_blank()) +scale_color_manual(values=c("red","black")) +xlab("logFC") + facet_wrap(~Comparison) 
+  
+  prots.all.3 = as.data.frame(table(combo_table$Protein))$Var1[as.data.frame(table(combo_table$Protein))$Freq==3]
+  
+  c.o = combo_table[order(combo_table$adj.P.Val),]
+  c.o$Order = 1:nrow(c.o)
+  c.o[substr(c.o$Protein,1,3) == "Got",]
+  
+  c3 = combo_table[combo_table$Protein %in% prots.all.3,]
+  
+  c3 = c3[order(c3$adj.P.Val,decreasing=F),]
+  
+  heat.df = t(log2(df.2[,colnames(df.2) %in% head(unique(c3$Protein),50)]))
+  rownames(heat.df) = df.tissue$PG.Genes[paste0(df.tissue$PG.Genes,"_",df.tissue$PG.MolecularWeight) %in% rownames(heat.df)]
+  colnames(heat.df) = c("AMW20.1","AMW20.2","AMW20.3","AMW35.1","AMW35.2","AMW35.3","AMW50.1","AMW50.2","AMW50.3")
+  
+  temp = data.frame(Group = df.2$conc)
+  temp$Group = factor(temp$Group,levels=c(0,35,50),labels=c("AMW20","AMW35","AMW50"))
+  
+  Var1 <- my_pal
+  names(Var1) <- c(levels(temp$Group))
+  
+  anno_colors <- list(Group = Var1)
+  rownames(temp) = colnames(heat.df)
+  
+  scale_rows = function(x){
+      m = apply(x, 1, mean, na.rm = T)
+      s = apply(x, 1, sd, na.rm = T)
+      return((x ) / s)
+  }
+  
+  rownames(heat.df) = toupper(rownames(heat.df))
+  
+  ph = as.ggplot(pheatmap(heat.df,scale="row", annotation_col=subset(temp,select= c(Group)),color = colorRampPalette(c("blue","white","red"))(100), annotation_colors = anno_colors,show_colnames = T)) +ggtitle(title)
+  
+  genes = unique(df.tissue$PG.Genes[paste0(df.tissue$PG.Genes,"_",df.tissue$PG.MolecularWeight) %in% prots.all.3])
+  
+  if(title == strsplit(names(df[3]),"_")[[1]][7]){
+  
+    enrich.all.3 = unlist(mapIds(org.Hs.eg.db, keys = genes,
+         column = "ENTREZID", keytype = "SYMBOL"))
+  
+    genes.univ = unique(df.tissue$PG.Genes)
+  
+    enrich.univ = unlist(mapIds(org.Hs.eg.db, keys = genes.univ,
+         column = "ENTREZID", keytype = "SYMBOL"))
+  
+    set.seed(777)
+    paths = summary(enrichGO(enrich.all.3,'org.Hs.eg.db',ont="BP",universe = enrich.univ))
+  
+  
+  } else {
+    enrich.all.3 = unlist(mapIds(org.Mm.eg.db, keys = genes,
+         column = "ENTREZID", keytype = "SYMBOL"))
+  
+    genes.univ = unique(df.tissue$PG.Genes)
+  
+    enrich.univ = unlist(mapIds(org.Mm.eg.db, keys = genes.univ,
+         column = "ENTREZID", keytype = "SYMBOL"))
+  
+    set.seed(777)
+    paths = summary(enrichGO(enrich.all.3,'org.Mm.eg.db',ont="BP",universe = enrich.univ))
+  
+  }
+  
+  
+  paths$GeneRatio = sapply(paths$GeneRatio , function(x) eval(parse(text = x)))
+  paths$Significant = ifelse(paths$qvalue < 0.05,"Significant","NS" )
+
+  # paths$qvalue = -log10(paths$qvalue)
+  paths$label = paths$Description 
+  
+  
+  paths$label[6:nrow(paths)]= ""
+  
+
+  
+  pgo = ggplot(paths,aes(x =GeneRatio,y=-log10(qvalue) ,fill=-log10(qvalue))) + 
+    geom_jitter(shape=21) +
+    theme_bw()  +
+      geom_text_repel(aes(label = label),size=3,
+      box.padding = 1.5,
+      segment.ncp = 3,
+  color="black") +
+    scale_fill_gradient(low="white",high="red") +
+    ylab("-log10(q-value)")+
+    ggtitle(title)
+  
+  return(list(pv,ph,pgo,data.frame(paths,tissue=title)))
+  
+}
+
+
+p1 = fit.go(df[[names(df[1])]],strsplit(names(df[1]),"_")[[1]][7])
+p2 = fit.go(df[[names(df[2])]],strsplit(names(df[2]),"_")[[1]][7]) 
+p3 = fit.go(df[[names(df[3])]],strsplit(names(df[3]),"_")[[1]][7]) 
+p4 = fit.go(df[[names(df[4])]],strsplit(names(df[4]),"_")[[1]][7]) 
+p5 = fit.go(df[[names(df[5])]],strsplit(names(df[5]),"_")[[1]][7]) 
+
+
+
+```
+
+
+```{r}
+
+pdf("~tissue_venns.pdf",height=7,width=30)
+plot_grid(p1[[1]],p2[[1]],p3[[1]],p4[[1]],p5[[1]],ncol = 5)
+dev.off()
+
+pdf("~tissue_heatmaps.pdf",height=9,width=26.25)
+plot_grid(p1[[2]],p2[[2]],p3[[2]],p4[[2]],p5[[2]],ncol = 5)
+dev.off()
+
+pdf("~tissue_pathways.pdf",height=5.5,width=33)
+plot_grid(p1[[3]],p2[[3]],p3[[3]],p4[[3]],p5[[3]],ncol = 5)
+
+dev.off()
+
+pdf("~tissue_pathways_top5.pdf",height=7,width=5.5)
+path.p = rbind(p1[[4]],p2[[4]],p3[[4]],p4[[4]],p5[[4]])
+
+write.csv(subset(path.p,select=c(Description,qvalue,label,Significant,GeneRatio,tissue)),"Figure_5/5f_data.csv")
+
+path.p = path.p[path.p$label !="",]
+
+ggplot(path.p,aes(x=label,y=GeneRatio))+ geom_bar(stat="identity",position=position_dodge(),fill="grey75") +  theme_bw(11)+theme(axis.text.x = element_text(angle=90,hjust=1),legend.title = element_blank())+xlab("") +coord_flip()+facet_wrap(~tissue,scales="free_y",ncol=1)+theme(strip.background = element_blank())
+
+dev.off()
+
+
+```
+
+
+
+```{r}
+
+tt = df[[names(df[5])]]
+tt = tt[tt$PG.Genes == "Tfpi",]
+ttp = data.frame(value=unname(unlist(tt))[7:15],group = rep(c("00","35","50"),each=3))
+ttp$value = as.numeric(ttp$value)
+ggplot(ttp,aes(x=group,y=log2(value),color=group)) + geom_jitter(height=0,width=0.2)
+
+
+```
+
+
