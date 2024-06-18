@@ -1,0 +1,634 @@
+---
+title: "Fig2E_GitHub"
+author: "Emily Wolfrum"
+date: "2024-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+## 442 FILTER NO FILTER; 442 50 FILTER NO FILTER; WHOLE LIVER 
+
+```
+
+
+
+```{r}
+
+pacman::p_load(tidyverse, pheatmap, ggVennDiagram, patchwork, ggrepel, ordinal, factoextra, data.table, limma, clusterProfiler, org.Mm.eg.db, readxl, eulerr)  
+
+krange <- c("#ced3df", "#b5bdcf", "#9ba8c0", "#8192af", "#697e9f", "#506890", "#36507f", "#1f3970", "#04235e")
+
+my_pal = c("#ced3df","#8192af","#1f3970" )
+
+
+df = read.table("Fig2_E_Kobold_44200NF_44200F_44250NF_44250F_Whole_Report.tsv", sep = "\t", quote = "") 
+
+```
+
+```{r}
+
+colnames(df) <- df[1, ]
+df = df[-1, ]
+
+colnames(df) <- gsub("PC00033_Project|PG.Quantity|.raw.", "", colnames(df))
+
+##this still doesn't give us 3940 unique rows... maybe skip it for now? 
+df$newid <- paste(df$PG.ProteinNames, df$PG.MolecularWeight, sep = "_" )
+
+df = dplyr::relocate(df, "newid", .after = "PG.Genes")
+
+metabolites = as.data.frame(t(df[,8:ncol(df)])) ## create new df of only the protein values
+
+colnames(metabolites) = t(df$newid) ## add column names back into newly transposed df 
+
+metabolites=data.frame(ID = rownames(metabolites), Group = rownames(metabolites), metabolites) ## tidy up new df 
+
+metabolites$Group = gsub("Kobold_|_1|_2|_3|\\[|\\]" , "", metabolites$Group)
+
+metabolites$Group <- substr(metabolites$Group, start = 3, stop = nchar(metabolites$Group))
+
+metabolites$Group = trimws(metabolites$Group)
+
+```
+
+## PCA -- everything included
+
+convert 0s to 1s 
+
+```{r}
+
+pcas = df 
+
+pcas[, 8:length(pcas)] <- lapply(pcas[, 8:length(pcas)], as.numeric) 
+
+
+is.nan.data.frame <- function(x){do.call(cbind, lapply(x, is.nan))}
+
+pcas.imp = df
+
+pcas.imp[, 8:length(pcas.imp)] <- lapply(pcas.imp[, 8:length(pcas.imp)], as.numeric) 
+
+pcas.imp[is.nan(pcas.imp)] <- 1
+ 
+pc.t = t(log2(pcas.imp[,8:length(pcas.imp)]))
+
+colnames(pc.t) = paste0(df$PG.ProteinNames, df$PG.MolecularWeight)
+
+pcs = prcomp(pc.t)
+
+pc.d = as.data.frame(pcs$x)
+
+# pc.d$ID = colnames(metabolites[, 3: length(metabolites)])
+
+pc.d$Group = rownames(pc.d) 
+
+pc.d = pc.d %>% mutate(Group = gsub("Kobold_|[0-9+]\\]", "", Group), 
+                       Group = substr(Group, start = 3, stop = nchar(Group)-2))
+                      
+pc.d$Group <- factor(pc.d$Group, levels = c("442_00_Filter", "442_00_noFilter",  "442_50_Filter", " 442_50_noFilter", " ProteomicsLiver"))
+
+p1 = ggplot(pc.d,aes(x = PC1,y=PC2,color=Group))  + geom_jitter(width=10)+ scale_color_manual(values=krange[c(1, 3, 5, 7, 9)]) + theme_bw(11) + xlab("PC1 37.5%") + ylab("PC2 16%")
+
+
+p1 
+
+# ggsave("Fig2E_pca_FNF_WL.pdf", plot = p1, height=4,width=6, dpi = 320) 
+
+```
+
+## PCA without proteomics liver info 
+
+```{r}
+
+pcas = df[, 1:19]
+
+pcas[, 8:length(pcas)] <- lapply(pcas[, 8:length(pcas)], as.numeric) 
+
+
+is.nan.data.frame <- function(x){do.call(cbind, lapply(x, is.nan))}
+
+pcas.imp = df[, 1:19]
+
+pcas.imp[, 8:length(pcas.imp)] <- lapply(pcas.imp[, 8:length(pcas.imp)], as.numeric) 
+
+pcas.imp[is.nan(pcas.imp)] <- 1
+ 
+pc.t = t(log2(pcas.imp[,8:length(pcas.imp)]))
+
+colnames(pc.t) = paste0(df$PG.ProteinNames, df$PG.MolecularWeight)
+
+pcs = prcomp(pc.t)
+
+pc.d = as.data.frame(pcs$x)
+
+# pc.d$ID = colnames(metabolites[, 3: length(metabolites)])
+
+pc.d$Group = rownames(pc.d) 
+
+pc.d = pc.d %>% mutate(Group = gsub("Kobold_|[0-9+]\\]", "", Group), 
+                       Group = substr(Group, start = 3, stop = nchar(Group)-2))
+                      
+str(pc.d$Group) 
+
+pc.d$Group <- factor(pc.d$Group, levels = c("442_00_Filter", "442_00_noFilter", "442_50_Filter", " 442_50_noFilter"))
+
+p1 = ggplot(pc.d,aes(x = PC1,y=PC2,color=Group))  + geom_jitter(width=10)+ scale_color_manual(values=krange[c(1, 3, 5, 7, 9)]) + theme_bw(11) + labs(x = "PC1 36.6%", y = "PC2 17.4%")
+
+
+p1
+
+# ggsave("Fig2E_pca_FNF.pdf", plot = p1, height=4,width=6, dpi = 320) 
+
+```
+
+### No variance
+
+These proteins were removed due to 0 variance.
+
+```{r}
+
+metabolites[,3:(ncol(metabolites))] = lapply(metabolites[,3:(ncol(metabolites))], as.numeric) ## 
+
+xx = data.matrix(metabolites[,3:(ncol(metabolites))]) ## duplicate metabolites df 
+
+xx[is.na(xx)]  = 0 #convert NA to 0 
+metabolites[,3:(ncol(metabolites))] = xx ## replace metabolites values with xx values (sub the NA for 0) can't I just do this in my regular df? 
+
+vars = apply(data.matrix(metabolites[,3:(ncol(metabolites))]), 2, var) # find the variance of all columns 
+
+ix = which(vars==0) # indicate where var = 0
+
+if(length(ix)>0){ ## remove if the variance is 0 
+metabolites = metabolites[, ! colnames(metabolites) %in% names(ix) ]
+}
+
+```
+
+
+### Proteins identifed per sample
+
+Plotted here are the number of proteins detected per sample
+
+```{r}
+
+metabs = data.frame(ID = metabolites$ID, Group = metabolites$Group, count = unlist(lapply(1:nrow(metabolites),function(x) sum(metabolites[x, 1:(ncol(metabolites))]>0,na.rm=T) )))
+
+metabs = metabs[order(metabs$Group),]
+
+metabs = metabs %>% mutate(ID = substr(ID, start = 6, stop = nchar(ID)), ID = gsub("Kobold_|obold_", "", ID))
+
+ggplot(metabs,aes(x=ID,y=count,fill=Group)) + 
+  geom_bar(stat="identity")+
+  theme_classic() +
+  scale_y_continuous(expand=c(0,0)) + 
+   theme(axis.text.x = element_text(angle=45,hjust=1)) + 
+   ggtitle("Number of Proteins Detected Per Sample") + 
+   scale_fill_manual(values=krange)
+
+```
+
+```{r}
+
+
+ind = function(x){
+  sum(as.numeric(I(as.numeric(x)==0)))
+}
+
+## repeat heatmap without Proteomics Liver  
+
+temp = metabolites
+temp = temp[1:12, ]
+
+temp[temp > 0] = 1 ## if over 0, count as 1 
+temp$Group = substr(temp$ID, start= 12, stop = nchar(temp$ID)-2)
+
+temp$Group = case_when(temp$Group == "_442_50_noFilter" ~ "442_50_noFilter", 
+                       temp$Group == "_442_50_noFilter_2" ~ "442_50_noFilter_2", 
+                       temp$Group == "_442_50_noFilter_3" ~ "442_50_noFilter_3", TRUE ~ temp$Group) 
+   
+
+rownames(temp) <- gsub("\\[|\\]|Kobold_", "", rownames(temp))
+rownames(temp) <- substr(rownames(temp), start = 3, stop = nchar(rownames(temp)))
+rownames(temp) <- trimws(rownames(temp))
+
+heat.df = t(sapply(subset(temp,select= - c(Group, ID)), as.numeric)) # convert all value columns to numeric 
+
+rownames(heat.df) = NULL
+colnames(heat.df) = rownames(temp)
+
+temp$Group<- as.factor(temp$Group) 
+
+Var1 <- krange[c(4:7)]
+names(Var1) <- c(levels(temp$Group))
+
+anno_colors <- list(Group = Var1)
+
+heat.df = heat.df[order(apply(heat.df, 1, ind),decreasing=T),]
+
+```
+
+```{r}
+
+ph1 = pheatmap(heat.df, annotation_col=subset(temp,select= c(Group)), cluster_rows = FALSE, color = colorRampPalette(c("white","black"))(2), annotation_colors = anno_colors) 
+
+# ggsave("S_Fig2E_heatmap_noproteomics_FNF.pdf",plot = ph1, height=4,width=6, dpi = 320) 
+
+
+temp = metabolites
+
+temp[temp > 0] = 1 ## if over 0, count as 1 
+temp$Group = metabolites$Group ## now add Group column 
+
+heat.df = t(sapply(subset(temp, select = - c(Group, ID)), as.numeric)) # convert all value columns to numeric 
+
+rownames(heat.df) = NULL
+colnames(heat.df) = rownames(temp)
+
+temp$Group<- as.factor(temp$Group) 
+
+Var1 <- krange[4:8]
+names(Var1) <- c(levels(temp$Group))
+
+anno_colors <- list(Group = Var1)
+
+heat.df = heat.df[order(apply(heat.df, 1, ind),decreasing=T),]
+
+pheatmap(heat.df, annotation_col=subset(temp,select= c(Group)), cluster_rows = FALSE, color = colorRampPalette(c("white","black"))(2), annotation_colors = anno_colors) 
+
+# ggsave("S_Fig2E_heatmap_noproteomics_FNF_WL.pdf", height=4,width=6, dpi = 320) 
+
+```
+
+### Overlap of protein detected in at least one sample
+
+
+```{r}
+
+colnames(temp) <- colnames(metabolites) 
+
+temp$ID <- NULL 
+
+make.sub <- function(df, quoted.grp) { 
+newdf = subset(df[df$Group == quoted.grp,], select= - c(Group))
+return(newdf) 
+} 
+
+# d.442 = subset(temp[temp$Group == "442_00_Filter",],select= - c(Group))
+
+d.dfs = lapply(unique(temp$Group),function(qq) { make.sub(temp, qq) } ) 
+names(d.dfs) <- unique(temp$Group) 
+ 
+## count 0s by column 
+#Must be in 3/3
+
+protein.list <- function(list1, numb) { 
+
+  sub1 = colnames(list1[[numb]])[apply(list1[[numb]], 2, ind) == 0 ]
+ return(sub1)                      
+                      
+} 
+
+proteins.list = lapply(1:length(d.dfs), function(qq) { protein.list(d.dfs, qq) } )
+
+names(proteins.list) <- unique(temp$Group)
+
+proteins.list.no = proteins.list[1:5]
+
+ggVennDiagram(proteins.list.no, category.names = unique(temp$Group)[1:5], label="count") +
+  scale_color_manual(values=krange) + 
+  scale_fill_gradient( low="white",high="#FF0000") + 
+  scale_x_continuous(expand = expansion(mult = .2))
+
+
+# ggsave("Fig2E_Venn_FNF_WL.pdf", height=6,width=6, dpi = 320) 
+
+
+```
+
+```{r}
+
+proteins.list.no = proteins.list[1:2]
+
+ggVennDiagram(proteins.list.no, category.names = unique(temp$Group)[1:2], label="count") + 
+  scale_color_manual(values=krange) + 
+  scale_fill_gradient( low="white",high="#FF0000") + 
+  scale_x_continuous(expand = expansion(mult = .2))
+
+
+# ggsave("Fig2E_Venn_442_FvU.pdf", height=6,width=6, dpi = 320) 
+
+
+```
+
+```{r}
+
+proteins.list.no = proteins.list[3:4]
+
+ggVennDiagram(proteins.list.no, 
+                    category.names = unique(temp$Group)[3:4], label="count") + 
+  scale_color_manual(values=krange) + 
+  scale_fill_gradient( low="white",high="#FF0000") + 
+  scale_x_continuous(expand = expansion(mult = .2))
+
+
+# ggsave("~/bbc-secondary/research/SHELR_20231204_Kobold/Fig2E_Venn_442_50_FvU.pdf", height=6,width=6, dpi = 320) 
+
+
+```
+
+```{r}
+
+proteins.list.no = proteins.list[c(2, 4, 5)]
+
+ggVennDiagram(proteins.list.no, 
+                    category.names = unique(temp$Group)[c(2,4,5)], label="count") + 
+  scale_color_manual(values=krange) + 
+  scale_fill_gradient( low="white",high="#FF0000") + 
+  scale_x_continuous(expand = expansion(mult = .2))
+
+
+# ggsave("Fig2E_Venn_NoF.pdf", height=6,width=6, dpi = 320) 
+
+```
+
+```{r}
+
+# names(proteins.list) <- c("AMW 20 Filter", "AMW20", "AMW50 Filter", "AMW50", "Whole Liver")
+
+fit = euler(proteins.list[c(2, 4, 5)],shape="circle")
+colorpal = euler(proteins.list[c(2, 4, 5)],shape="circle")$original
+colors = colorRampPalette(c("white","red"))(max(colorpal))
+eu1 = plot(fit, quantities = TRUE,col = my_pal,lwd=3,fills =  colors[colorpal])
+
+eu1
+
+# ggsave("Fig2E_Venn_prop.pdf", plot = eu1,  height=6,width=6, dpi = 320) 
+
+sav.d = proteins.list[c(2, 4, 5)]
+names(sav.d) <- c("AMW20", "AMW50", "Whole Liver")
+sav.d <- lapply(sav.d, as.data.frame) 
+
+sav.d = rbindlist(sav.d, idcol = TRUE) 
+
+colnames(sav.d) <- c("Group", "Proteins_Present") 
+
+amw20s = sav.d[sav.d$Group == "AMW20", ]
+amw50s = sav.d[sav.d$Group == "AMW50", ]
+wl = sav.d[sav.d$Group== "Whole Liver", ]
+
+amw20s$Group <- NULL 
+amw50s$Group <- NULL 
+wl$Group <- NULL 
+
+colnames(amw20s) <- "AMW20"
+colnames(amw50s) <- "AMW50"
+colnames(wl) <- "Whole Liver"
+
+# write.csv(amw20s, "amw20proteins.csv")
+# write.csv(amw50s, "amw50proteins.csv")
+# write.csv(wl, "wlproteins.csv")
+
+
+amw20f = proteins.list[["442_00_Filter"]]
+
+f_20and50 = data.frame(AMW20F = c(proteins.list[["442_00_Filter"]], rep("NA", times = 298)), AMW50F = c(proteins.list[["442_50_Filter"]]))
+
+# write.csv(f_20and50, "filters.proteins.csv")
+
+```
+
+```{r}
+
+proteins.list.no = proteins.list[c(1, 2, 3, 4)]
+
+supp = ggVennDiagram(proteins.list.no, 
+                    category.names = unique(temp$Group)[c(1, 2, 3, 4)], label="count") +scale_color_manual(values=krange) +   scale_fill_gradient( low="white",high="#FF0000") +scale_x_continuous(expand = expansion(mult = .2))
+
+supp
+
+# ggsave("S_Fig2E_Venn.pdf", plot = supp, height=6,width=6, dpi = 320) 
+
+
+
+```
+
+
+```{r}
+
+# venn.diagram(list(B = 1:1800, A = 1571:2020), fill = c("lightblue", "green"), 
+#              alpha = c(0.5, 0.5), lwd =0, "venn_diagram.tiff")
+
+# names(proteins_list) <- c("442", "BD AQ", "MetOH") 
+
+fit = euler(proteins.list, shape="circle")
+colorpal = euler(proteins.list,shape="circle")$original
+colors = colorRampPalette(c("white","red"))(max(colorpal))
+eu = plot(fit, quantities = TRUE,col = my_pal,lwd=3,fills =  colors[colorpal])
+eu
+# ggsave("Fig2E_Venn_eulerr.4.pdf", plot = eu,  height=6.5,width=8, dpi = 320) 
+
+fit = euler(proteins.list[1:4],shape="circle")
+colorpal = euler(proteins.list[1:4],shape="circle")$original
+colors = colorRampPalette(c("white","red"))(max(colorpal))
+eu1 = plot(fit, quantities = TRUE,col = my_pal,lwd=3,fills =  colors[colorpal])
+eu1 
+# ggsave("Fig2E_Venn_eulerr.no_prt.pdf", plot = eu1,  height=6.5,width=8, dpi = 320) 
+
+fit = euler(proteins.list[1:2],shape="circle")
+colorpal = euler(proteins.list[1:2],shape="circle")$original
+colors = colorRampPalette(c("white","red"))(max(colorpal))
+eu2 = plot(fit, quantities = TRUE,col = my_pal,lwd=3,fills =  colors[colorpal])
+
+# ggsave("Fig2E_Venn_eulerr.20.pdf", plot = eu2,  height=6.5,width=8, dpi = 320) 
+
+
+fit = euler(proteins.list[3:4],shape="circle")
+colorpal = euler(proteins.list[3:4],shape="circle")$original
+colors = colorRampPalette(c("white","red"))(max(colorpal))
+eu3 = plot(fit, quantities = TRUE,col = my_pal,lwd=3,fills =  colors[colorpal])
+
+# ggsave("Fig2E_Venn_eulerr.50.pdf", plot = eu3,  height=6.5,width=8, dpi = 320) 
+
+```
+
+### Limma {.tabset}
+Analyze only pairwise complete proteins, so we'll run 3 limmas.
+
+
+```{r}
+
+metabolites$Group = as.character(metabolites$Group)
+
+```
+
+```{r}
+
+limma1 <- function(df1, char.v1, char.v2, pro_sublist1, pro_sublist2) { 
+   
+   design = model.matrix(~ -1 + Group, data=df1[df1$Group ==char.v1|df1$Group == char.v2 ,])
+   limma.matrix = data.matrix(t(log2(df1[df1$Group == char.v1|df1$Group == char.v2, colnames(df1) %in% intersect(pro_sublist1, pro_sublist2)])))
+   
+   fit = lmFit(limma.matrix, design)
+
+   c1 <<- colnames(fit$design)[1]
+   c2 <<- noquote(colnames(fit$design)[2])
+   contr.matrix <- limma::makeContrasts( paste0(c1, "-", c2), levels = design)
+
+   fit35_00 <- limma::contrasts.fit(fit, contrasts=contr.matrix)
+   fit35_00 <- limma::eBayes(fit35_00, trend=TRUE)
+ 
+   table35_00 <- limma::topTable(fit35_00, number = 10000)
+   table35_00$Comparison = paste0(c1, "-", c2)
+   table35_00$Comparison = gsub("Group", "", table35_00$Comparison) 
+   
+   
+return(table35_00)   
+   
+}
+
+
+metabolites$Group = trimws(metabolites$Group) 
+
+table35_00 = limma1(metabolites, "442_00_Filter", "442_00_noFilter", proteins.list[["442_00_Filter"]], proteins.list[["442_00_noFilter"]])
+
+table50_00 = limma1(metabolites, "442_50_Filter", "442_50_noFilter", proteins.list[["442_50_Filter"]], proteins.list[["442_50_noFilter"]])
+
+
+##    put results together:: 
+combo_table = rbind(table35_00,table50_00)
+combo_table$adj.P.Val = p.adjust(combo_table$P.Value,method="BH")
+combo_table$sig =ifelse(combo_table$adj.P.Val < 0.05, "FDR < 0.05","NS")
+combo_table$Protein = rownames(combo_table)
+
+prots.all.3 = as.data.frame(table(combo_table$Protein))$Var1[as.data.frame(table(combo_table$Protein))$Freq==2]
+
+ggplot(combo_table, aes(x = logFC, y = -log10(adj.P.Val), color=sig)) + geom_point() +
+  theme_bw() +
+  theme(legend.title = element_blank()) + 
+  scale_color_manual(values=c("red","black")) + 
+  xlab("logFC") + 
+  facet_wrap(~Comparison) 
+
+
+```
+
+#### GSEA with function: 
+
+```{r}
+
+whole = read_excel("proteins in metabolite extracts (1).xlsx", sheet=2)
+
+do.gsea <- function(df1, res1, char.vector) { 
+genes = unique(df1$PG.Genes[paste(df1$PG.ProteinNames, df1$PG.MolecularWeight, sep = "_") %in% rownames(res1)] )
+
+
+enrich.all.3 = unlist(mapIds(org.Mm.eg.db, keys = genes,
+       column = "ENTREZID", keytype = "SYMBOL"))
+
+
+genes.univ = unique(df1$PG.Genes)
+
+enrich.univ = unlist(mapIds(org.Mm.eg.db, keys = union(unlist(whole), genes.univ),
+       column = "ENTREZID", keytype = "SYMBOL"))
+
+paths = as.data.frame(enrichGO(enrich.all.3,'org.Mm.eg.db',ont="BP",universe = enrich.univ))
+
+paths$GeneRatio = sapply(paths$GeneRatio , function(x) eval(parse(text = x)))
+
+paths$qvalue = -log10(paths$qvalue)
+paths$label = paths$Description 
+
+paths$label[11:nrow(paths)]=""
+
+## presets for gsea1: 
+ggplot(paths,aes(x =GeneRatio,y=qvalue ,size=qvalue,fill=GeneRatio)) + 
+  geom_point(shape=21) +
+  theme_bw()  +
+  geom_text_repel(aes(label = label),size=3, max.overlaps = Inf, xlim= c(.1, NA),
+box.padding = 2,color="black", direction = "y") + 
+  scale_fill_gradient(low="white",high="red") + 
+  labs(title = char.vector)
+
+# , xlim = c(.1, NA),   in the geom_text_repel call <- 
+
+
+## presets for gsea2: 
+# ggplot(paths,aes(x =GeneRatio,y=qvalue ,size=qvalue,fill=GeneRatio)) + 
+#   geom_point(shape=21) +
+#   theme_bw()  +
+#   geom_text_repel(aes(label = label),size=3, max.overlaps = Inf,
+# box.padding = 3.25,color="black", direction = "y") + 
+#   scale_fill_gradient(low="white",high="red") + 
+#   labs(title = char.vector)
+# 
+
+}
+
+gsea1 = do.gsea(df, table35_00, "GSEA for DE genes in 442 Filter vs. 442 No Filter")
+
+# ggsave("Fig2E_442_FNF_GSEA.pdf", height=6,width=6, dpi = 320) 
+
+
+gsea2 = do.gsea(df, table50_00, "GSEA for DE genes in 442 50 Filter vs. 442 50 No Filter")
+
+# ggsave("Fig2E_442_50_FNF_GSEA.pdf", height=6,width=6, dpi = 320) 
+
+
+```
+
+HM of raw, log2 transformed values-- only include top 50 DA proteins as seen in LIMMA 
+
+```{r}
+
+fnf_442 = rownames(table35_00[1:50, ])
+fnf_50 = rownames(table50_00[1:50, ])
+
+df.442 = metabolites %>% 
+   dplyr::select(ID, Group, all_of(fnf_442))
+
+df.442 = df.442[df.442$Group %in% c("442_00_Filter", "442_00_noFilter"), ]
+
+df.new = df %>% dplyr::select(newid, PG.Genes)
+
+colnames(df.442) 
+
+length(unique(df$PG.Genes[df$newid %in% colnames(df.442)]))
+
+colnames(df.442) <- gsub("_.*","",colnames(df.442))
+
+length(unique(colnames(df.442)))
+
+heat.df = t(sapply(subset(df.442, select = - c(Group, ID)), as.numeric)) # convert all value columns to numeric 
+
+heat.df = log2(heat.df)
+
+rownames(df.442) <- substr(rownames(df.442), start = 12, stop = nchar(rownames(df.442)))
+
+rownames(heat.df) = NULL
+colnames(heat.df) = rownames(df.442)
+
+rownames(heat.df) <- colnames(df.442)[3:52]
+
+df.442$Group<- as.factor(df.442$Group) 
+
+Var1 <- krange[c(4, 8)]
+names(Var1) <- c(levels(df.442$Group))
+
+anno_colors <- list(Group = Var1)
+
+heat.df = heat.df[order(apply(heat.df, 1, ind),decreasing=T),]
+
+ph2 = pheatmap(heat.df, annotation_col=subset(df.442,select= c(Group)), cluster_rows = FALSE, color = colorRampPalette(c("blue",  "white","red"))(100), fontsize_row = 8, scale = "row", annotation_colors = anno_colors) 
+
+
+ggsave("S_Fig2E_heatmap_442_FNF.pdf",plot = ph2, height=7,width=6, dpi = 320) 
+
+ph2a = pheatmap(heat.df, annotation_col=subset(df.442,select= c(Group)), cluster_rows = TRUE, color = colorRampPalette(c("blue",  "white","red"))(100), fontsize_row = 8, scale = "row", annotation_colors = anno_colors) 
+
+ggsave("S_Fig2E_heatmap_442_FNF.pdf",plot = ph2a, height=7,width=6, dpi = 320) 
+
+
+```

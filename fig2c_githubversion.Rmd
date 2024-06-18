@@ -1,0 +1,434 @@
+---
+title: "KOBOLD-GitHub"
+author: "Emily Wolfrum"
+date: "2024-06-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+pacman::p_load(tidyverse, pheatmap, ggVennDiagram, patchwork, ggrepel, ordinal, factoextra, data.table, limma, clusterProfiler, org.Mm.eg.db, readxl, ggforce, eulerr )  
+
+krange <- c("#ced3df", "#b5bdcf", "#9ba8c0", "#8192af", "#697e9f", "#506890", "#36507f", "#1f3970", "#04235e")
+
+my_pal = c("#ced3df","#8192af","#1f3970" )
+
+my_pal =c("#ced3df","#ea8d55","#008000","black")
+
+
+```
+
+
+```{r}
+
+###           THIS IS A COPY OF THE DATASET THAT EXISTS IN varidata/massspeccore/metabolomics/metabolomic core info/publications....kobold/figure 2. This file was copied to the bbc-research folder on 12.04.23 and should be written over with new data from the massspeccore if the file is updated there before publication 
+
+
+df = read.table("Fig2_C_Kobold_44200_BDaq_BDorg_80MeOH_Report.tsv", sep = "\t", quote = "") 
+
+
+colnames(df) <- df[1, ]
+df = df[-1, ]
+
+colnames(df) <- gsub("PC00033_Project|PG.Quantity|.raw.", "", colnames(df))
+
+##create unique ID 
+df$newid <- paste(df$PG.ProteinNames, df$PG.MolecularWeight, sep = "_" )
+
+df = dplyr::relocate(df, "newid", .after = "PG.Genes")
+
+metabolites = as.data.frame(t(df[,8:ncol(df)])) ## create new df of only the protein values
+colnames(metabolites) = t(df$newid) ## add column names back into newly transposed df 
+
+metabolites=data.frame(ID = rownames(metabolites), Group = rownames(metabolites), metabolites) ## tidy up new df 
+
+metabolites$Group <- c("442 ", "442 ", "442 ", "BD_AQ", "BD_AQ", "BD_AQ", "BD_Organic", "BD_Organic", "BD_Organic", "MetOH", "MetOH", "MetOH")
+
+```
+
+
+## PCA -- everything included
+
+convert 0s to 1s 
+
+```{r}
+
+
+### FIGURE OUT WHY THE PCA CODE FROM ZACH RESULTS IN A MASSIVE DF FOR ME WHEN HIS CODE RESULTS IN A 9 X 11 DF FOR HIM 
+
+pcas = df 
+
+pcas[, 8:length(pcas)] <- lapply(pcas[, 8:length(pcas)], as.numeric) 
+
+is.nan.data.frame <- function(x){do.call(cbind, lapply(x, is.nan))}
+
+pcas.imp = df
+
+pcas.imp[, 8:length(pcas.imp)] <- lapply(pcas.imp[, 8:length(pcas.imp)], as.numeric) 
+
+pcas.imp[is.nan(pcas.imp)] <- 1
+ 
+pc.t = t(log2(pcas.imp[,8:length(pcas.imp)]))
+
+colnames(pc.t) = paste0(df$PG.ProteinNames, df$PG.MolecularWeight)
+
+pcs = prcomp(pc.t)
+
+pc.d = as.data.frame(pcs$x)
+
+pc.d$Group = rownames(pc.d) 
+
+pc.d = pc.d %>% mutate(Group = gsub("Kobold_| _.*|_[0-9+]|\\[[0-9+]|\\]", "", Group), 
+                       Group = substr(Group, start = 2, stop = length(Group)))
+
+
+p1 = ggplot(pc.d,aes(x = PC1,y=PC2,color=Group))  + geom_jitter(width=10)+ scale_color_manual(values=my_pal) + theme_bw(11)
+
+p1 + geom_mark_ellipse() + xlab("PC1 39%") + ylab("PC2 24.5%") 
+
+# ggsave("Fig2C_pca.pdf", height=5,width=6, dpi = 320) 
+
+```
+
+
+PCA No BD Organic 
+
+```{r}
+
+pcas = df[c(1:13, 17:length(df))]
+
+pcas[, 8:length(pcas)] <- lapply(pcas[, 8:length(pcas)], as.numeric) 
+
+
+is.nan.data.frame <- function(x){do.call(cbind, lapply(x, is.nan))}
+
+pcas.imp = df[c(1:13, 17:length(df))]
+
+pcas.imp[, 8:length(pcas.imp)] <- lapply(pcas.imp[, 8:length(pcas.imp)], as.numeric) 
+
+pcas.imp[is.nan(pcas.imp)] <- 1
+ 
+pc.t = t(log2(pcas.imp[,8:length(pcas.imp)]))
+
+colnames(pc.t) = paste0(df$PG.ProteinNames, df$PG.MolecularWeight)
+
+pcs = prcomp(pc.t)
+
+pc.d = as.data.frame(pcs$x)
+
+pc.d$Group = rownames(pc.d) 
+
+pc.d = pc.d %>% mutate(Group = gsub("Kobold_| _.*|_[0-9+]|\\[[0-9+]|\\]", "", Group), 
+                       Group = substr(Group, start = 2, stop = length(Group)))
+
+rownames(pc.d) <- gsub(" Kobold|\\[|\\]", "", rownames(pc.d))
+rownames(pc.d) <- substr(rownames(pc.d), start = 3, stop = nchar(rownames(pc.d)))
+
+
+p1 = ggplot(pc.d,aes(x = PC1,y=PC2,color=Group)) + 
+  geom_jitter(width=10) + 
+  scale_color_manual(values=my_pal) + 
+  theme_bw(11)
+
+
+p1 + geom_mark_ellipse() + xlab("PC1 39.8%") + ylab("PC2 24.7%")
+
+# ggsave("Fig2C_pca_no_organics.pdf", height=5,width=6, dpi = 320) 
+
+```
+
+### No variance
+
+These proteins were removed due to 0 variance.
+
+```{r}
+
+
+metabolites[,3:(ncol(metabolites))] = lapply(metabolites[,3:(ncol(metabolites))], as.numeric) ## 
+
+xx = data.matrix(metabolites[,3:(ncol(metabolites))]) ## duplicate metabolites df 
+
+xx[is.na(xx)]  = 0 #convert NA to 0 
+metabolites[,3:(ncol(metabolites))] = xx ## replace metabolites values with xx values (sub the NA for 0) can't I just do this in my regular df? 
+
+vars = apply(data.matrix(metabolites[,3:(ncol(metabolites))]), 2, var) # find the variance of all columns 
+
+ix = which(vars==0) # indicate where var = 0
+
+if(length(ix)>0){ ## remove if the variance is 0 
+metabolites = metabolites[, ! colnames(metabolites) %in% names(ix) ]
+}
+
+
+```
+
+
+### Proteins identifed per sample
+
+Plotted here are the number of proteins detected per sample
+
+```{r}
+
+metabs = data.frame(  ID = metabolites$ID, Group = metabolites$Group, count = unlist(lapply(1:nrow(metabolites),function(x) sum(metabolites[x, 1:(ncol(metabolites))]>0,na.rm=T) )))
+
+metabs = metabs[order(metabs$Group),]
+
+ggplot(metabs,aes(x=ID,y=count,fill=Group)) + 
+  geom_bar(stat="identity")+
+  theme_classic() +
+  scale_y_continuous(expand=c(0,0)) +theme(axis.text.x = element_text(angle=45,hjust=1)) + ggtitle("Number of Proteins Detected Per Sample") + scale_fill_manual(values=krange)
+
+```
+
+## Presence/Absence Heatmaps
+
+```{r}
+
+ind = function(x){
+  sum(as.numeric(I(as.numeric(x)==0)))
+}
+
+temp = metabolites
+
+temp[temp > 0] = 1 ## if over 0, count as 1 
+temp$Group = metabolites$Group ## now add Group column 
+
+
+heat.df = t(sapply(subset(temp,select= - c(Group, ID)), as.numeric)) # convert all value columns to numeric 
+
+rownames(heat.df) = NULL
+colnames(heat.df) = rownames(temp)
+
+
+temp$Group<- as.factor(temp$Group) 
+
+Var1 <- krange[4:7]
+names(Var1) <- c(levels(temp$Group))
+
+anno_colors <- list(Group = Var1)
+
+
+heat.df = heat.df[order(apply(heat.df, 1, ind),decreasing=T),]
+
+pheatmap(heat.df, annotation_col=subset(temp,select= c(Group)), cluster_rows = FALSE, color = colorRampPalette(c("white","black"))(2), annotation_colors = anno_colors) 
+
+
+## repeat heatmap without BD_organic 
+
+temp = metabolites
+
+temp[temp > 0] = 1 ## if over 0, count as 1 
+temp$Group = metabolites$Group ## now add Group column 
+
+temp = temp[temp$Group != "BD_Organic", ]
+
+heat.df = t(sapply(subset(temp,select= - c(Group, ID)), as.numeric)) # convert all value columns to numeric 
+
+rownames(heat.df) = NULL
+colnames(heat.df) = rownames(temp)
+
+
+temp$Group<- as.factor(temp$Group) 
+
+Var1 <- my_pal[1:3]
+names(Var1) <- c(levels(temp$Group))
+
+anno_colors <- list(Group = Var1)
+
+heat.df = heat.df[order(apply(heat.df, 1, ind),decreasing=T),]
+
+ph <- pheatmap(heat.df, annotation_col=subset(temp,select= c(Group)), cluster_rows = FALSE, color = colorRampPalette(c("white","black"))(2), annotation_colors = anno_colors) 
+
+# ggsave("Fig2C_heatmap.pdf", plot = ph, height=5,width=6, dpi = 320) 
+
+```
+
+
+### Overlap of protein detected in at least one sample
+
+
+```{r}
+
+colnames(temp) <- colnames(metabolites) 
+
+temp$ID <- NULL 
+
+d.442 = subset(temp[temp$Group == "442 ",],select= - c(Group))
+d.bdaq = subset(temp[temp$Group == "BD_AQ",],select= - c(Group))
+d.metoh = subset(temp[temp$Group == "MetOH",],select= - c(Group))
+
+#Must be in 3/3
+
+proteins_list <- list(c442_00 = colnames(d.442)[apply(d.442, 2, ind) == 0 ], 
+                      cbdaq = colnames(d.bdaq)[apply(d.bdaq, 2, ind) == 0], 
+                      cmetoh = colnames(d.metoh)[apply(d.metoh, 2, ind) == 0])
+
+
+ggVennDiagram(proteins_list,category.names = c("442","BD_AQ","MetOH"), label="count") +
+  scale_color_manual(values=my_pal) +  
+  scale_fill_gradient( low="white",high="red") +
+  scale_x_continuous(expand = expansion(mult = .2))
+
+
+ggsave("Fig2C_Venn.pdf", height=5,width=6, dpi = 320) 
+
+names(proteins_list) <- c("442", "BD AQ", "MetOH") 
+
+fit = euler(proteins_list,shape="circle")
+colorpal = euler(proteins_list,shape="circle")$original
+colors = colorRampPalette(c("white","red"))(max(colorpal))
+eu = plot(fit, quantities = TRUE,col = my_pal,lwd=3,fills =  colors[colorpal])
+
+ggsave("Fig2C_Venn_eulerr.pdf", plot = eu,  height=6.5,width=6.5, dpi = 320) 
+
+
+```
+
+### Limma {.tabset}
+Analyze only pairwise complete proteins, so we'll run 3 limmas.
+
+
+```{r}
+
+
+metabolites$Group = as.character(metabolites$Group)
+metabolites$Group = case_when(metabolites$Group == "442 " ~ "442_", TRUE ~ metabolites$Group) 
+
+metabolites = metabolites[c(1:6, 10:nrow(metabolites)), ]
+
+
+limma1 <- function(df1, char.v1, char.v2, pro_sublist1, pro_sublist2) { 
+   
+   design = model.matrix(~ -1 + Group, data=df1[df1$Group ==char.v1|df1$Group == char.v2 ,])
+   limma.matrix = data.matrix(t(log2(df1[df1$Group == char.v1|df1$Group == char.v2, colnames(df1) %in% intersect(pro_sublist1, pro_sublist2)])))
+   
+   fit = lmFit(limma.matrix, design)
+
+   c1 <<- colnames(fit$design)[1]
+   c2 <<- noquote(colnames(fit$design)[2])
+   contr.matrix <- limma::makeContrasts( paste0(c1, "-", c2), levels = design)
+
+   fit35_00 <- limma::contrasts.fit(fit, contrasts=contr.matrix)
+   fit35_00 <- limma::eBayes(fit35_00, trend=TRUE)
+ 
+   table35_00 <- limma::topTable(fit35_00, number = 10000)
+   table35_00$Comparison = paste0(c1, "-", c2)
+   table35_00$Comparison = gsub("Group", "", table35_00$Comparison) 
+   
+   
+return(table35_00)   
+   
+}
+
+# table35_00 = limma1(metabolites, "BD_AQ", "442_", proteins_list$cbdaq, proteins_list$c442_00)
+
+table35_00 = limma1(metabolites, "442_", "BD_AQ", proteins_list$c442_00,  proteins_list$cbdaq)
+
+table50_00 = limma1(metabolites, "BD_AQ", "MetOH", proteins_list$cbdaq, proteins_list$cmetoh)
+
+table50_35 = limma1(metabolites, "442_", "MetOH", proteins_list$c442_00, proteins_list$cmetoh)
+
+```
+
+
+```{r}
+
+##    put results together:: 
+
+combo_table = rbind(table35_00,table50_00,table50_35)
+combo_table$adj.P.Val = p.adjust(combo_table$P.Value,method="BH")
+combo_table$sig =ifelse(combo_table$adj.P.Val < 0.05, "FDR < 0.05","NS")
+combo_table$Protein = rownames(combo_table)
+
+prots.all.3 = as.data.frame(table(combo_table$Protein))$Var1[as.data.frame(table(combo_table$Protein))$Freq==3]
+
+
+ggplot(combo_table, aes(x = logFC, y = -log10(adj.P.Val), color=sig)) + geom_point() +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  scale_color_manual(values=c("red","black")) +
+  xlab("logFC") + facet_wrap(~Comparison) 
+
+```
+
+
+#### GSEA:
+
+```{r}
+
+whole = read_excel("proteins in metabolite extracts (1).xlsx", sheet=2)
+
+do.gsea <- function(df1, res1, char.vector) { 
+genes = unique(df1$PG.Genes[paste(df1$PG.ProteinNames, df1$PG.MolecularWeight, sep = "_") %in% rownames(res1)] )
+
+enrich.all.3 = unlist(mapIds(org.Mm.eg.db, keys = genes,
+       column = "ENTREZID", keytype = "SYMBOL"))
+
+
+genes.univ = unique(df1$PG.Genes)
+
+enrich.univ = unlist(mapIds(org.Mm.eg.db, keys = union(unlist(whole), genes.univ),
+       column = "ENTREZID", keytype = "SYMBOL"))
+
+paths = as.data.frame(enrichGO(enrich.all.3,'org.Mm.eg.db',ont="BP",universe = enrich.univ))
+
+paths$GeneRatio = sapply(paths$GeneRatio , function(x) eval(parse(text = x)))
+
+paths$qvalue = -log10(paths$qvalue)
+paths$label = paths$Description 
+
+paths$label[11:nrow(paths)]=""
+
+## settings for g1 
+ggplot(paths,aes(x =GeneRatio,y=qvalue ,size=qvalue,fill=GeneRatio)) +
+  geom_point(shape=21) +
+  theme_bw()  +
+  geom_text_repel(aes(label = label), size=3, max.overlaps = Inf, xlim =c(.1, .1),
+box.padding = 1.75,color="black", direction = "x") +
+  scale_fill_gradient(low="white",high="red") +
+  labs(title = char.vector) +
+   scale_x_continuous(expand = expansion(mult = .3))
+
+#g2: 
+# ggplot(paths,aes(x =GeneRatio,y=qvalue ,size=qvalue,fill=GeneRatio)) + 
+#   geom_point(shape=21) +
+#   theme_bw()  +
+#   geom_text_repel(aes(label = label), size=3, max.overlaps = Inf,
+# box.padding = 1.5,color="black", direction = "x") + 
+#   scale_fill_gradient(low="white",high="red") + 
+#   labs(title = char.vector) + 
+#    scale_x_continuous(expand = expansion(mult = .3)) 
+## xlim =c(.1, .1), 
+
+
+## g3's version: 
+# ggplot(paths,aes(x =GeneRatio,y=qvalue ,size=qvalue,fill=GeneRatio)) + 
+#   geom_point(shape=21) +
+#   theme_bw()  +
+#   geom_text_repel(aes(label = label), size=3, label.padding = .2, max.overlaps = Inf, nudge_x = 0.05,
+# box.padding = 2.25,color="black", direction = "y") + 
+#   scale_fill_gradient(low="white",high="red") + 
+#   labs(title = char.vector) + 
+#    scale_x_continuous(expand = expansion(mult = .3)) 
+
+
+}
+
+g1 = do.gsea(df, table35_00, "GSEA for DE genes in 442 vs. BD AQ")
+
+ggsave("Fig2C_gsea_442vsbd.pdf", plot = g1, height=6,width=7, dpi = 320) 
+
+
+# g2 = do.gsea(df, table50_00, "GSEA for DE genes in BD AQ vs. MetOH")
+
+# ggsave("Fig2C_gsea_bdvmetoh.pdf",plot = g2, height=6.25,width=7, dpi = 320) 
+
+
+# g3 = do.gsea(df, table50_35, "GSEA for DE genes in 442 vs. MetOH")
+
+# ggsave("Fig2C_gsea_442vsmetoh.pdf",plot = g3, height=6.25,width=7, dpi = 320) 
+
+
+```

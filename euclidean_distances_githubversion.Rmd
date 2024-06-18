@@ -1,0 +1,497 @@
+---
+title: "Euclidean Distances Analysis Github"
+author: "Emily Wolfrum"
+date: "2024-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+
+
+```{r}
+
+pacman::p_load(tidyverse, reshape2, stats, Hmisc, patchwork, mgcv, gam, gridExtra) 
+
+krange <- c("#ced3df", "#b5bdcf", "#9ba8c0", "#8192af", "#697e9f", "#506890", "#36507f", "#1f3970", "#04235e")
+
+my_pal = c("#ced3df","#8192af","#1f3970" )
+
+my_pal =c("#ced3df","#ea8d55","#008000","black")
+
+tdo = read_csv(file = "MC00472_IP_Longitudinal_Untargeted-CD-withpeakratingfilter.csv")
+
+tdo$time <- substr(tdo$Sample, start = nchar(tdo$Sample)-1, stop = nchar(tdo$Sample))
+tdo$time <- gsub("_", "", tdo$time)
+tdo$time <- as.factor(tdo$time) 
+
+tdo = relocate(tdo, time, .after= "Extraction")
+
+
+```
+
+Fig.5: Longitudinal data-- quantify the magnitude of a time-dependent change on the per-metabolite level. 
+
+Take top 5 time-dependent metabolites from each group (amw50, amw20, etc.) and plot like a spaghetti plot over time
+
+## PCA on log-transformed values: 
+
+```{r}
+
+pcs = prcomp(log(tdo[, 4:length(tdo)]), center = TRUE, scale. = TRUE)
+pc.d = as.data.frame(pcs$x)
+
+pc.d$Group = tdo$Extraction
+
+
+ggplot(pc.d, aes(x = PC1,y=PC2,color=Group)) + 
+  geom_jitter(width=10) + 
+  scale_color_manual(values = my_pal) + 
+  theme_bw(11) + 
+  ggtitle("Center & Scaled")
+
+
+```
+
+
+```{r}
+
+tdo = read_csv(file = "MC00472_IP_Longitudinal_Untargeted-CD-withpeakratingfilter.csv")
+
+tdo$time <- substr(tdo$Sample, start = nchar(tdo$Sample)-1, stop = nchar(tdo$Sample))
+tdo$time <- gsub("_", "", tdo$time)
+tdo$time <- as.factor(tdo$time) 
+
+tdo = relocate(tdo, time, .after= "Extraction")
+
+
+## data file to work from: 
+# lgin = log2(tdo[-(1:3)])
+
+lgin = log10(tdo[-(1:3)])
+lgin = cbind(tdo[c(1:3)], lgin )
+
+
+##label lgin columns 
+
+nams <- colnames(lgin)
+
+for(i in seq_along(lgin)) { 
+  label(lgin[[i]]) <- nams[[i]]
+  
+  }
+
+##check labels [x] 
+
+##rename metabolite columns to remove special characters 
+colnames(lgin) <- c("sample", "method", "time", paste("metab_",1:333, sep=""))
+
+##reformat time 
+lgin$time <- as.numeric(as.character(lgin$time))
+
+
+## split df by extraction type: 
+dat = split(lgin, lgin$method)
+
+## drop sample and extraction columns from dat df objects 
+dat = lapply(dat, function(qq) { qq <- qq[c(3:length(qq))]; return(qq) })
+
+
+## previous lapply that worked: 
+# lapply(dataframe, function(qq) { gam(qq ~ s(time), data = ex) })
+
+##set up gams 
+
+gamf <- function(list1) { 
+  lapply(list1, function(qq) { gam(qq ~ s(time), data = list1) })
+  } 
+
+## running the gam on each column of each df: 
+fits = lapply(dat, function(qq) { gamf(qq) })
+
+fit1 = gamf(dat[[1]] )
+fit2 = gamf(dat[[2]] )
+fit3 = gamf(dat[[3]] )
+fit4 = gamf(dat[[4]] )
+
+
+## predicted fits
+pred.f1 <- list() 
+
+for(i in seq_along(dat[[1]])) { 
+  
+ pred.f1[[i]] = predict(fit1[[i]], newdata = dat[[1]][c(1, i)])
+  
+}
+
+
+pred.f2 <- list() 
+
+for(i in seq_along(dat[[2]])) { 
+  
+ pred.f2[[i]] = predict(fit2[[i]], newdata = dat[[2]][c(1, i)])
+  
+}
+
+pred.f3 <- list() 
+
+for(i in seq_along(dat[[3]])) { 
+  
+ pred.f3[[i]] = predict(fit3[[i]], newdata = dat[[3]][c(1, i)])
+  
+}
+
+
+pred.f4 <- list() 
+
+for(i in seq_along(dat[[4]])) { 
+  
+ pred.f4[[i]] = predict(fit4[[i]], newdata = dat[[4]][c(1, i)])
+  
+}
+
+
+
+names(pred.f1) <- c("time", paste("metab_",1:333, sep=""))
+
+pred.f1 = lapply(pred.f1, as.data.frame) 
+
+pred.f1 = do.call(cbind, pred.f1) 
+colnames(pred.f1) <- c("time", paste("metab_",1:333, sep=""))
+
+names.f <- function(predicted) { 
+  names(predicted) <- c("time", paste("metab_",1:333, sep=""))
+  predicted = lapply(predicted, as.data.frame) 
+  predicted = do.call(cbind, predicted) 
+  colnames(predicted) <- c("time", paste("metab_",1:333, sep=""));
+  return(predicted) 
+}
+
+pred.fits = list(pred.f1, pred.f2, pred.f3, pred.f4) 
+
+pred.fits = lapply(pred.fits, function(qq) names.f(qq) )
+
+plot.all <- function(original, predicted) { 
+original$type = "original" 
+predicted$type = "predicted" 
+
+df = rbind(original, predicted) 
+df2 = reshape2::melt(df, id.vars = c("time", "type")) 
+
+df3 = df2[1:1840, ]
+
+ggplot(df3[df3$type =="original", ], aes(x = time, y = as.numeric(value))) + 
+  geom_point() + 
+  geom_line() + 
+  geom_point(data = df3[df3$type== "predicted", ], aes(x = time, y = as.numeric(value)), color = "red") + 
+  facet_wrap(~ variable, scales = "free") 
+
+} 
+
+
+plot.all(dat[[1]], pred.fits[[1]])
+
+plot.all(dat[[2]], pred.fits[[2]])
+
+plot.all(dat[[3]], pred.fits[[3]])
+
+plot.all(dat[[4]], pred.fits[[4]])
+
+
+sums1 = lapply(fit1, function(qq) { qq <- as.data.frame(summary(qq)$anova$`Pr(F)`[2]); return(qq) }) 
+sums2 = lapply(fit2, function(qq) { qq <- as.data.frame(summary(qq)$anova$`Pr(F)`[2]); return(qq) }) 
+sums3 = lapply(fit3, function(qq) { qq <- as.data.frame(summary(qq)$anova$`Pr(F)`[2]); return(qq) }) 
+sums4 = lapply(fit4, function(qq) { qq <- as.data.frame(summary(qq)$anova$`Pr(F)`[2]); return(qq) }) 
+
+amw20.p = rbindlist(sums1, idcol = TRUE) 
+amw20f.p = rbindlist(sums2, idcol = TRUE) 
+amw50.p = rbindlist(sums3, idcol = TRUE) 
+amw50f.p = rbindlist(sums4, idcol = TRUE) 
+
+amw20.p$method= "AMW20"
+amw20f.p$method = "AMW20F"
+amw50.p$method = "AMW50"
+amw50f.p$method = "AMW50F"
+
+p.res = list(amw20.p, amw20f.p, amw50.p, amw50f.p) 
+
+p.res = lapply(p.res, as.data.frame) 
+p.res = rbindlist(p.res) 
+
+colnames(p.res) <- c("metabolite", "p-value", "extraction") 
+p.res$extraction = as.factor(p.res$extraction)
+
+p.res = p.res[p.res$metabolite %in% c(paste("metab_",1:333, sep=""))]
+
+p.res %>% 
+  group_by(extraction) %>% 
+  summarise(sum(`p-value` < 0.05) )
+
+p.res = p.res[p.res$`p-value` <0.05, ]
+
+ps = split(p.res, p.res$extraction) 
+
+ps = lapply(ps, function(qq) { qq <- qq$metabolite; return(qq) })
+
+ggVennDiagram(ps, category.names = c("AMW20","AMW20F","AMW50", "AMW50F"), label="count") + scale_color_manual(values=my_pal) + scale_fill_gradient( low="white",high="red") +scale_x_continuous(expand = expansion(mult = .2))
+
+```
+
+```{r} 
+
+upplot = upset(fromList(ps), order.by = "freq", line.size = 0.25)  
+
+skip_set_size_plot <- function(ups) {
+  main <- ups$Main_bar
+  ## find panel grob
+  panel_idx <- grep("panel", main$layout$name, fixed = TRUE)
+  ## find text grob
+  text_idx <- which(
+    vapply(main$grobs[[panel_idx]]$children, 
+           \(x) inherits(x, "text"), 
+           logical(1)))
+  tG <- main$grobs[[panel_idx]]$children[[text_idx]]
+  tG$label <- paste0(tG$label, " (",
+                     scales::label_percent(0.1)(as.numeric(tG$label) / 
+                                                  sum(as.numeric(tG$label))),
+                     ")")
+  main$grobs[[panel_idx]]$children[[text_idx]] <- tG
+  grid.newpage()
+  grid.draw(arrangeGrob(main, ups$Matrix, heights = ups$mb.ratio))
+}
+
+skip_set_size_plot(upplot)
+
+
+# pdf("longitudinal_upset.pdf", onefile=FALSE)
+# upplot
+# ggsave("longitudinal_upset.pdf", plot = upplot, height=6.25,width=7, dpi = 320) 
+
+
+```
+
+
+rank all results by abs. slope & plot top 10 
+
+```{r}
+
+top.plots = p.res[order(p.res$`p-value`), ][1:13]
+
+to.plot = lgin[, colnames(lgin) %in% c("method", "time", top.plots$metabolite)]
+
+plabs = lapply(to.plot, label)
+plabs = lapply(plabs, as.data.frame) 
+plabs = rbindlist(plabs, idcol = TRUE)  
+colnames(plabs) <- c("metab", "name") 
+colnames(to.plot) <- plabs$name
+colnames(to.plot)[[2]] <- "time"
+
+to.plot = reshape2::melt(to.plot, id.vars = c("Extraction", "time")) 
+
+ggplot(to.plot, aes(x = time, y = value, group = Extraction, color = Extraction)) + 
+  geom_line() + 
+  facet_wrap(~ variable, scales = "free") + 
+  scale_color_manual(values = my_pal) + 
+  labs(y = "log10 transformed peak area") 
+
+### USE EXPORT GUI: 6 X 8" PDF FILE FOR PUBLICATION 
+
+```
+
+heatmap limited to the top 100 significantly different metabolites 
+samples as columns & metabolites as rows 
+fixed columns and cluster by rows 
+
+```{r}
+
+## find which unique metabolites with slopes significantly diff than 0 in any of the 4 extraction methods 
+ps <- lapply(ps, as.data.frame) 
+hmd = rbindlist(ps, idcol = TRUE) 
+
+p.res = p.res[order(p.res$`p-value`), ]
+
+
+## you'll have to manually modify the number of rows you extract to obtain the top 100 UNIQUE metabolites 
+top100 = p.res[1:166, ]
+sig = top100$metabolite
+length(unique(sig)) 
+
+#subset the log-transformed raw dataframe to include only the significantly non-zero metabolites as well as 3 identifiers 
+hmp = lgin[colnames(lgin) %in% c("sample", "method", "time", sig)]
+
+## reorder rows for the heatmap -- this causes heatmap to error out 
+
+hmp = hmp[order(hmp$method, as.numeric(hmp$time)), ]
+
+#save the identifiers in a separate df for the heatmap 
+hlab = hmp[1:3]
+rownames(hlab) <- hlab$sample
+
+hlab$sample <- NULL 
+
+##keep the same rownames for the heatmap dataframe as well as the heatmap labels dataframe 
+rownames(hmp) <- hmp$sample
+
+## drop the identifier columns from the heatmap dataframe 
+hmp = hmp[4:length(hmp)]
+
+hmp = t(hmp)
+
+rownames(hmp) <- NULL 
+
+anno_cols = list(
+  method = c(AMW20= "#ced3df", AMW20F="#ea8d55", AMW50 = "#008000", AMW50F = "black"))
+
+
+pheatmap(hmp, cluster_cols = FALSE, scale = "row", annotation_col = hlab, annotation_colors = anno_cols,  show_colnames = F, colorRampPalette(c("blue","white","red"))(100), border_color = NA)
+
+## USE EXPORT GUI TO SAVE 4X6" IMAGE 
+
+```
+
+heatmap limited to the top 50 significantly different metabolites 
+samples as columns & metabolites as rows 
+fixed columns and cluster by rows 
+
+```{r}
+
+## find which unique metabolites with slopes significantly diff than 0 in any of the 4 extraction methods 
+ps <- lapply(ps, as.data.frame) 
+hmd = rbindlist(ps, idcol = TRUE) 
+
+p.res = p.res[order(p.res$`p-value`), ]
+
+
+## you'll have to manually modify the number of rows you extract to obtain the top 100 UNIQUE metabolites 
+top100 = p.res[1:83, ]
+sig = top100$metabolite
+length(unique(sig)) 
+
+#subset the log-transformed raw dataframe to include only the significantly non-zero metabolites as well as 3 identifiers 
+hmp = lgin[colnames(lgin) %in% c("sample", "method", "time", sig)]
+
+
+hmp = hmp[order(hmp$method, as.numeric(hmp$time)), ]
+
+#save the identifiers in a separate df for the heatmap 
+hlab = hmp[1:3]
+rownames(hlab) <- hlab$sample
+
+hlab$sample <- NULL 
+
+##keep the same rownames for the heatmap dataframe as well as the heatmap labels dataframe 
+rownames(hmp) <- hmp$sample
+
+## drop the identifier columns from the heatmap dataframe 
+hmp = hmp[4:length(hmp)]
+
+hmp = t(hmp)
+
+rownames(hmp) <- NULL 
+
+anno_cols = list(
+  method = c(AMW20= "#ced3df", AMW20F="#ea8d55", AMW50 = "#008000", AMW50F = "black"))
+
+pheatmap(hmp, cluster_cols = FALSE, scale = "row", annotation_col = hlab, annotation_colors = anno_cols,  show_colnames = F, colorRampPalette(c("blue","white","red"))(100))
+
+```
+
+
+```{r}
+
+#modify column names for ease of use 
+colnames(hmd) <- c("extraction", "metabolite") 
+
+#save non-duplicated list of sig. metabolites
+sig = hmd$metabolite
+sig = sig[!duplicated(sig) ]
+
+#subset the log-transformed raw dataframe to include only the significantly non-zero metabolites as well as 3 identifiers 
+hmp = lgin[colnames(lgin) %in% c("sample", "method", "time", sig)]
+
+hmp = hmp[order(hmp$method, as.numeric(hmp$time)), ]
+
+#save the identifiers in a separate df for the heatmap 
+hlab = hmp[1:3]
+rownames(hlab) <- hlab$sample
+
+hlab$sample <- NULL 
+
+##keep the same rownames for the heatmap dataframe as well as the heatmap labels dataframe 
+rownames(hmp) <- hmp$sample
+
+## drop the identifier columns from the heatmap dataframe 
+hmp = hmp[4:length(hmp)]
+
+hmp = t(hmp)
+
+# ann_c = data.frame("method" = c("AMW20", "AMW20F", "AMW50", "AMW50F"), my_pal) 
+# ann_c$method <- as.factor(ann_c$method) 
+rownames(hmp) <- NULL 
+
+
+pheatmap(hmp, cluster_cols = FALSE, scale = "row", annotation_col = hlab,show_colnames = F, colorRampPalette(c("blue","white","red"))(100))
+
+
+```
+
+
+```{r}
+
+dis = read_csv("pca_score.csv") 
+
+dis2 = dis[c(1:3)]
+colnames(dis2) <- c("sample", "PC1", "PC2") 
+dis2 = as.data.frame(dis2)
+
+rownames(dis2) <- dis2$sample 
+
+dis2$sample = substr(dis2$sample, start = 5, stop = nchar(dis2$sample))
+dis2$sample = substr(dis2$sample, start = 1, stop = nchar(dis2$sample) - 2)
+dis2$sample = gsub("_", "", dis2$sample) 
+
+dis2l = split(dis2, dis2$sample) 
+
+dis2l = lapply(dis2l, function(q) { q$sample <- NULL; return(q)}  )
+
+euc = lapply(dis2l, function(q) { dist(q, method = "euclidean") })
+
+euc2 = lapply(euc, function(q) { q <- q[upper.tri(q)]  })
+
+euc2 = lapply(euc2, function(q) { q[na.omit(q) ]})
+
+euc2 = lapply(euc2, function(q) as.vector(q) )
+
+meanz = lapply(euc2, mean) 
+
+unlist(meanz) 
+
+euc3 = lapply(euc2, as.data.frame) 
+
+euc3 = rbindlist(euc3, idcol = T) 
+
+colnames(euc3) <- c("method", "distance") 
+
+# write.csv(euc3, file = "euclidean.csv")
+
+# write.csv(euc[[1]], file = "amw20_euclidean.csv")
+
+tmp = euc[[1]]
+
+library(multivariance)
+
+euc.f = lapply(euc, function(qq) { multivariance:::dist.to.matrix(qq)} ) 
+
+euc.f = lapply(euc.f, as.data.frame) 
+
+
+# write.csv(rbindlist(euc.f, idcol = TRUE, fill = TRUE), file = "all_euclidean.csv")
+
+```
+
+
+
+
